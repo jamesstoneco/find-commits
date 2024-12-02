@@ -13,7 +13,7 @@ import sys
 import time
 import statistics
 import signal
-from rich.prompt import Confirm
+from rich.prompt import Prompt
 
 # Initialize rich console
 console = Console()
@@ -194,11 +194,15 @@ def search_commits_in_repo(repo_path, date, author, verbose=False):
     except Exception as e:
         return None
 
-def format_commit(commit):
+def format_commit(commit, is_new=False):
     """Format a commit for display."""
     short_hash = commit.hexsha[:7]
-    date = datetime.fromtimestamp(commit.committed_date)
-    return f"[dim]{short_hash}[/dim] {commit.summary}"
+    new_tag = "[bold green]NEW[/] " if is_new else ""
+    # Wrap long commit messages while preserving formatting
+    summary = commit.summary
+    if len(summary) > 80:
+        summary = summary[:77] + "..."
+    return f"    {new_tag}{summary} [dim]({short_hash})[/]"
 
 class SearchStats:
     def __init__(self):
@@ -232,45 +236,106 @@ class SearchStats:
         console.print("\n")
         console.print(table)
 
+def display_commits_by_date(results, seen_commits=None):
+    """Display commits grouped by repository and date."""
+    # First, reorganize commits by repo and date
+    organized = defaultdict(lambda: defaultdict(list))
+    total_commits = 0
+    
+    if seen_commits is None:
+        seen_commits = set()
+    
+    for repo_name, commits in results.items():
+        for commit in commits:
+            commit_date = datetime.fromtimestamp(commit.committed_date)
+            organized[repo_name][commit_date.date()].append(commit)
+            total_commits += 1
+    
+    # Display organized results
+    total_repos = len(organized)
+    console.print(f"\n[bold green]Found {total_commits} commit{'s' if total_commits > 1 else ''} "
+                 f"across {total_repos} repositor{'ies' if total_repos > 1 else 'y'}:[/]")
+    
+    for repo_name, dates in organized.items():
+        console.print(f"\n[bold blue]{repo_name}[/]")
+        for date, commits in sorted(dates.items()):
+            console.print(f"  [yellow]{date.strftime('%d/%m')}[/] ([green]{len(commits)} commit{'s' if len(commits) > 1 else ''}[/])")
+            for commit in sorted(commits, key=lambda x: x.committed_date, reverse=True):
+                is_new = commit.hexsha not in seen_commits
+                if is_new:
+                    seen_commits.add(commit.hexsha)
+                console.print(format_commit(commit, is_new))
+    
+    return total_commits
+
 def search_adjacent_dates(repos, search_date, author, stats, verbose=False):
     """Search adjacent dates until commits are found or user cancels."""
     all_results = defaultdict(list)
     days_to_expand = 1
+    total_commits = 0
+    previous_total = 0
+    today = datetime.now().date()
+    seen_commits = set()  # Track seen commits to highlight new ones
     
-    while True:
-        before_date = search_date - timedelta(days=days_to_expand)
-        after_date = search_date + timedelta(days=days_to_expand)
+    # Initial search just for the specified date
+    try:
+        results, commits_found, _ = search_date_range(
+            repos, search_date, author, is_adjacent=False, stats=stats, verbose=verbose
+        )
+        all_results.update(results)
+        total_commits = display_commits_by_date(all_results, seen_commits)
         
-        console.print(f"\n[yellow]No commits found.[/]")
-        prompt = f"Expand search to ±{days_to_expand} day{'s' if days_to_expand > 1 else ''} (Y/n)"
-        if not Confirm.ask(prompt, default=True, show_default=False):
-            break
+        if total_commits == 0:
+            console.print(f"\n[yellow]No commits found.[/]")
+        
+        while True:
+            previous_total = total_commits
             
-        dates_to_search = [before_date, after_date]
-        total_commits_found = 0
-        
-        if verbose:
-            console.print(f"\nSearching {before_date.strftime('%A, %B %d')} and {after_date.strftime('%A, %B %d')}...")
-        else:
-            console.print(f"\nSearching ±{days_to_expand} day{'s' if days_to_expand > 1 else ''}...")
-        
-        for adj_date in dates_to_search:
-            adj_results, adj_total_commits, adj_times = search_date_range(
-                repos, adj_date, author, is_adjacent=True, stats=stats, verbose=verbose
-            )
+            prompt = f"Expand search to ±{days_to_expand} day [dim](Y/n)[/]"
+            response = Prompt.ask(prompt, default="y", show_default=False).lower()
+            if response != "y":  # Only continue if exactly "y"
+                break
             
-            if adj_total_commits > 0:
-                if verbose:
-                    console.print(f"[green]✓ Found {adj_total_commits} commit{'s' if adj_total_commits > 1 else ''} on {adj_date.strftime('%A, %B %d')}[/]")
-                all_results.update(adj_results)
-                total_commits_found += adj_total_commits
-            elif verbose:
-                console.print(f"[yellow]No commits found on {adj_date.strftime('%A, %B %d')}[/]")
-        
-        if total_commits_found > 0:
-            break
+            console.print(f"\nSearching ±{days_to_expand} day...")
             
-        days_to_expand += 1
+            # Search one day before and after (if not in future)
+            before_date = search_date.date() - timedelta(days=days_to_expand)
+            after_date = search_date.date() + timedelta(days=days_to_expand)
+            
+            # Only search future dates up to today
+            if after_date > today:
+                after_date = today
+            
+            # Search the entire range from before_date to after_date
+            for current_date in [before_date, after_date]:
+                try:
+                    results, commits_found, _ = search_date_range(
+                        repos, datetime.combine(current_date, datetime.min.time()),
+                        author, is_adjacent=True, stats=stats, verbose=verbose
+                    )
+                    # Update results while preserving existing commits
+                    for repo, commits in results.items():
+                        all_results[repo].extend(c for c in commits if c.hexsha not in seen_commits)
+                except SearchCancelled:
+                    raise
+            
+            # Display complete results for the entire range
+            if all_results:
+                total_commits = display_commits_by_date(all_results, seen_commits)
+                if total_commits > previous_total:
+                    console.print(f"\n[green]Found {total_commits - previous_total} new commit{'s' if total_commits - previous_total > 1 else ''}[/]")
+                else:
+                    console.print("\n[bold yellow]No new commits found in this range[/]")
+            else:
+                console.print("\n[yellow]No commits found in this range.[/]")
+            
+            days_to_expand += 1
+    
+    except SearchCancelled:
+        if all_results:
+            console.print("\n[yellow]Search interrupted.[/]")
+            total_commits = display_commits_by_date(all_results, seen_commits)
+        raise
     
     return all_results
 
@@ -280,19 +345,18 @@ def search_date_range(repos, date, author, is_adjacent=False, stats=None, verbos
     total_commits = 0
     search_times = []
     
-    progress = Progress(
+    with Progress(
         TextColumn("[bold blue]{task.description}"),
         BarColumn(bar_width=40),
+        TextColumn("[progress.percentage]{task.completed}/{task.total}"),
         TextColumn("•"),
         TimeElapsedColumn(),
         console=console,
         expand=True,
         transient=True
-    )
-    
-    with progress:
+    ) as progress:
         task = progress.add_task(
-            f"Searching {'adjacent ' if is_adjacent else ''}repositories",
+            f"Searching repositories",
             total=len(repos)
         )
         
@@ -301,6 +365,8 @@ def search_date_range(repos, date, author, is_adjacent=False, stats=None, verbos
                 repo_name = Path(repo_path).name
                 if verbose:
                     progress.update(task, description=f"Searching {repo_name:<30}")
+                else:
+                    progress.update(task, description="Searching repositories")
                 
                 try:
                     with timeout(30):
@@ -322,12 +388,12 @@ def search_date_range(repos, date, author, is_adjacent=False, stats=None, verbos
                     if verbose:
                         console.print(f"[yellow]Warning: Search timeout for {repo_name}[/]")
                 except KeyboardInterrupt:
-                    raise SearchCancelled()
+                    raise SearchCancelled
                 
                 progress.advance(task)
                 
         except KeyboardInterrupt:
-            raise SearchCancelled()
+            raise SearchCancelled
     
     return results, total_commits, search_times
 
@@ -356,15 +422,6 @@ def main(date, author, verbose, directory, directories):
     """Search for commits across multiple repositories."""
     stats = SearchStats()
     
-    # Handle directory options
-    search_dirs = []
-    if directory:
-        search_dirs = [directory]
-    elif directories:
-        search_dirs = list(directories)
-    else:
-        search_dirs = DEFAULT_SEARCH_DIRS
-    
     try:
         search_date = datetime.strptime(date, "%Y-%m-%d") if date else datetime.now()
     except ValueError:
@@ -372,8 +429,17 @@ def main(date, author, verbose, directory, directories):
         return
     
     try:
+        # Handle directory options
+        search_dirs = []
+        if directory:
+            search_dirs = [directory]
+        elif directories:
+            search_dirs = list(directories)
+        else:
+            search_dirs = DEFAULT_SEARCH_DIRS
+        
+        console.print("[bold]Phase 1: Repository Discovery[/]")
         if verbose:
-            console.print("[bold]Phase 1: Repository Discovery[/]")
             if directory:
                 console.print(f"Searching in directory: {directory}")
             elif directories:
@@ -384,7 +450,7 @@ def main(date, author, verbose, directory, directories):
                 console.print("Searching in default directories:")
                 for d in DEFAULT_SEARCH_DIRS:
                     console.print(f"  • {d}")
-                
+        
         repos = find_git_repos(base_dirs=search_dirs, stats=stats, verbose=verbose)
         
         if not repos:
@@ -393,27 +459,12 @@ def main(date, author, verbose, directory, directories):
                 stats.display()
             return
         
+        console.print(f"\n[bold]Phase 2: Commit Search[/]")
         if verbose:
-            console.print(f"\n[bold]Phase 2: Commit Search[/]")
-            console.print(f"Searching [bold]{len(repos)}[/] repositories for commits on [bold]{search_date.date()}[/]")
+            console.print(f"Searching [bold]{len(repos)}[/] repositories from [bold]{search_date.date()}[/] to present")
         
         try:
-            results, total_commits, search_times = search_date_range(
-                repos, search_date, author, stats=stats, verbose=verbose
-            )
-            
-            if not results:
-                results = search_adjacent_dates(repos, search_date, author, stats=stats, verbose=verbose)
-            
-            if results:
-                total_commits = sum(len(commits) for commits in results.values())
-                console.print(f"\n[bold green]Found {total_commits} commit{'s' if total_commits > 1 else ''} across {len(results)} repositor{'ies' if len(results) > 1 else 'y'}:[/]")
-                for repo_name, commits in results.items():
-                    console.print(f"\n[bold blue]{repo_name}[/] ([green]{len(commits)} commit{'s' if len(commits) > 1 else ''}[/])")
-                    for commit in sorted(commits, key=lambda x: x.committed_date, reverse=True):
-                        console.print(f"  {format_commit(commit)}")
-            else:
-                console.print("\n[yellow]No commits found in any searched dates.[/]")
+            results = search_adjacent_dates(repos, search_date, author, stats=stats, verbose=verbose)
             
             if verbose:
                 stats.display()
