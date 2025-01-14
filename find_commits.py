@@ -414,12 +414,16 @@ class timeout:
 
 @click.command()
 @click.option('--date', '-d', default=None, help='Date to search (YYYY-MM-DD)')
-@click.option('--author', '-a', default="your-name@users.noreply.github.com", help='Author email')
+@click.option('--author', '-a', default=None, help='Author email (required)')
 @click.option('--verbose', '-v', is_flag=True, help='Show detailed progress and statistics')
 @click.option('--directory', '-D', help='Single directory to search (expands ~ to home directory)')
 @click.option('--directories', '-dirs', multiple=True, help='Multiple directories to search (can be specified multiple times)')
 def main(date, author, verbose, directory, directories):
     """Search for commits across multiple repositories."""
+    if not author:
+        console.print("[red]Error: --author/-a option is required[/]")
+        return
+
     stats = SearchStats()
     
     try:
