@@ -2,7 +2,7 @@
 
 Git commit search utility that recursively scans directories to find commits by author or date range. Helps track work across multiple repositories.
 
-## Philosophy: written by human James Stone
+## Motivation: written by a bonefied human aka James Stone
 
 I wrote this as a way to experiment with creating a CLI tool that has both good UX and solves a real problem that I have. Which is that I work across many different projects and sometimes I want to know what I was up to on a specific date, yesterday, or date range. Typically this it to quality of quantify my timesheet notes but also has a range of other uses.
 
